@@ -1,7 +1,7 @@
 {
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/social-backend.test.cjs && node tests/social-ui.test.cjs && node tests/online-runtime.test.cjs && node tests/cloud-sync.test.cjs && node tests/routine.test.cjs"
+    "test": "node tests/social-backend.test.cjs && node tests/social-ui.test.cjs && node tests/online-runtime.test.cjs && node tests/cloud-sync.test.cjs && node tests/routine.test.cjs && node tests/campus-stories.test.cjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.1",
