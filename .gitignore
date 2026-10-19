@@ -23,3 +23,9 @@
 /app/Config/core.php
 /app/Config/database.php
 /vendors/*
+
+# Node and local secrets
+node_modules/
+.env
+.env.*
+!.env.example
