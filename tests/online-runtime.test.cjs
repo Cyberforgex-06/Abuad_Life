@@ -7,6 +7,7 @@ const child=spawn(process.execPath,['-e',`
 process.env.PORT='3219';process.env.JWT_SECRET='runtime-test-secret';process.env.DATABASE_URL='https://example.invalid';
 const neon=require('@neondatabase/serverless');let saved=null;
 require.cache[require.resolve('@neondatabase/serverless')].exports={neon:()=>async(strings,...values)=>{const q=strings.join('?');
+if(q.startsWith('select id,username'))return [{id:values[0],username:'runtime_test'}];
 if(q.startsWith('select state,revision'))return saved?[saved]:[];
 if(q.startsWith('insert into game_saves')){if(saved)return [];saved={state:JSON.parse(values[1]),revision:1};return [{revision:1}]}
 if(q.startsWith('update game_saves')){if(!saved||saved.revision!==values[2])return [];saved={state:JSON.parse(values[0]),revision:saved.revision+1};return [{revision:saved.revision}]}
