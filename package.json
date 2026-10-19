@@ -1,7 +1,7 @@
 {
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/social-backend.test.cjs && node tests/social-ui.test.cjs && node tests/online-runtime.test.cjs"
+    "test": "node tests/social-backend.test.cjs && node tests/social-ui.test.cjs && node tests/online-runtime.test.cjs && node tests/cloud-sync.test.cjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.1",
@@ -9,7 +9,6 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "jsonwebtoken": "^9.0.2",
     "ws": "^8.18.3"
   },
   "devDependencies": {}

@@ -2,7 +2,6 @@ require('dotenv').config();
 const express=require('express');
 const cors=require('cors');
 const bcrypt=require('bcryptjs');
-const jwt=require('jsonwebtoken');
 const {neon}=require('@neondatabase/serverless');
 const {WebSocketServer}=require('ws');
 const http=require('http');
@@ -11,15 +10,14 @@ const path=require('path');
 
 const PORT=process.env.PORT||3000;
 const DATABASE_URL=process.env.DATABASE_URL;
-const JWT_SECRET=process.env.JWT_SECRET || (process.env.NODE_ENV==='production' ? '' : crypto.randomBytes(48).toString('hex'));
-if (!JWT_SECRET) throw new Error('JWT_SECRET must be configured');
 if(!DATABASE_URL){console.warn('DATABASE_URL is not set; API will fail database calls.');}
 const sql=DATABASE_URL?neon(DATABASE_URL):async()=>{throw new Error('DATABASE_URL missing')};
 const app=express();
 app.disable('x-powered-by');
 app.set('trust proxy',1);
-const allowedOrigins=(process.env.ALLOWED_ORIGINS||'http://localhost:3000,https://abuad-life.onrender.com').split(',');
-app.use(cors({origin(origin,cb){cb(null,!origin||allowedOrigins.includes(origin))}}));
+const allowedOrigins=[process.env.APP_ORIGIN||(process.env.NODE_ENV==='production'?'https://abuad-life-api.onrender.com':'http://localhost:3000')];
+app.use(cors({credentials:true,origin(origin,cb){cb(null,!origin||allowedOrigins.includes(origin))}}));
+app.use('/api',(req,res,next)=>{if(!['GET','HEAD','OPTIONS'].includes(req.method)&&(req.get('X-Abuad-Request')!=='1'||(req.get('Origin')&&!allowedOrigins.includes(req.get('Origin')))))return res.status(403).json({error:'Request origin rejected.'});next()});
 app.use((req,res,next)=>{res.set('X-Content-Type-Options','nosniff');if(req.path.startsWith('/api/'))res.set('Cache-Control','no-store');next()});
 const attempts=new Map();
 app.use('/api', (req,res,next)=>{const key=req.ip+':'+(req.path.startsWith('/auth')?'auth':'api');const now=Date.now();let r=attempts.get(key);if(!r||r.until<now){r={count:0,until:now+60000};attempts.set(key,r)}if(++r.count>(req.path.startsWith('/auth')?20:180))return res.status(429).json({error:'Too many requests. Try again in a minute.'});next()});
@@ -30,7 +28,7 @@ app.use(express.static(path.join(__dirname,'dist')));
 const online=new Map();
 function clean(v,max=120){return String(v||'').replace(/[<>]/g,'').trim().slice(0,max)}
 function publicProfile(p){return {id:p.id,username:p.username,avatar:p.avatar,bio:p.bio||'',department:p.department||'',level:p.level||'',created_at:p.created_at,last_seen:p.last_seen}}
-function sign(user){return jwt.sign({id:user.id,username:user.username},JWT_SECRET,{expiresIn:'14d'})}
+const sessions=require('./sessions').sessionService(sql);
 async function initDb(){
  await sql`create extension if not exists pgcrypto`;
  await sql`create table if not exists players(
@@ -45,6 +43,8 @@ async function initDb(){
   last_seen timestamptz default now(),
   created_at timestamptz default now()
  )`;
+ await sql`create table if not exists player_sessions(token_hash text primary key,player_id uuid not null references players(id) on delete cascade,expires_at timestamptz not null)`;
+ await sql`delete from player_sessions where expires_at<=now()`;
  await sql`create table if not exists game_saves(player_id uuid primary key references players(id) on delete cascade, state jsonb not null, revision integer not null default 1, updated_at timestamptz not null default now())`;
  await sql`create table if not exists messages(
   id uuid primary key default gen_random_uuid(),
@@ -69,11 +69,12 @@ async function initDb(){
  await sql`create index if not exists idx_messages_room_created on messages(room,created_at desc)`;
  await sql`create index if not exists idx_dm_pair_created on direct_messages(sender_id,receiver_id,created_at desc)`;
 }
-async function auth(req,res,next){const h=req.headers.authorization||'';const token=h.startsWith('Bearer ')?h.slice(7):'';try{req.user=jwt.verify(token,JWT_SECRET);if(!await getMe(req.user.id))return res.status(401).json({error:'This account no longer exists. Please create an account.'});next()}catch(e){res.status(401).json({error:'Please sign in again.'})}}
+async function auth(req,res,next){try{req.user=await sessions.read(req);if(!req.user)return res.status(401).json({error:'Please sign in again.'});next()}catch(e){res.status(503).json({error:'Account service unavailable. Please try again.'})}}
 async function getMe(id){const rows=await sql`select id,username,avatar,bio,department,level,created_at,last_seen from players where id=${id}`;return rows[0]}
 app.get('/api/health',async(req,res)=>{try{await sql`select 1`;res.json({ok:true,online:online.size})}catch(e){res.status(500).json({ok:false,error:'Database unavailable'})}});
-app.post('/api/auth/register',async(req,res)=>{try{const username=clean(req.body.username,24).replace(/\s+/g,'_');const email=String(req.body.email||'').toLowerCase().trim().slice(0,160);const password=String(req.body.password||'');const department=clean(req.body.department,60);const level=clean(req.body.level,30);const avatar=clean(req.body.avatar,12)||'🧑🏾‍🎓';if(!/^[a-zA-Z0-9_]{3,24}$/.test(username))return res.status(400).json({error:'Username should be 3–24 letters, numbers or underscores.'});if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||(password.length<8||Buffer.byteLength(password,'utf8')>72))return res.status(400).json({error:'Use a valid email and a password of 8–72 UTF-8 bytes.'});const hash=await bcrypt.hash(password,10);const rows=await sql`insert into players(username,email,password_hash,avatar,department,level) values(${username},${email},${hash},${avatar},${department},${level}) returning id,username,avatar,bio,department,level,created_at,last_seen`;res.json({token:sign(rows[0]),profile:publicProfile(rows[0])})}catch(e){res.status(400).json({error:e.message&&e.message.includes('duplicate')?'Username or email already exists.':'Could not create account.'})}});
-app.post('/api/auth/login',async(req,res)=>{try{const login=String(req.body.login||'').toLowerCase().trim();const password=String(req.body.password||'');const rows=await sql`select * from players where lower(email)=${login} or lower(username)=${login}`;const user=rows[0];if(!user||!(await bcrypt.compare(password,user.password_hash)))return res.status(401).json({error:'Incorrect login details.'});await sql`update players set last_seen=now() where id=${user.id}`;res.json({token:sign(user),profile:publicProfile(user)})}catch(e){res.status(500).json({error:'Login failed.'})}});
+app.post('/api/auth/register',async(req,res)=>{try{const username=clean(req.body.username,24).replace(/\s+/g,'_');const email=String(req.body.email||'').toLowerCase().trim().slice(0,160);const password=String(req.body.password||'');const department=clean(req.body.department,60);const level=clean(req.body.level,30);const avatar=clean(req.body.avatar,12)||'🧑🏾‍🎓';if(!/^[a-zA-Z0-9_]{3,24}$/.test(username))return res.status(400).json({error:'Username should be 3–24 letters, numbers or underscores.'});if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||(password.length<8||Buffer.byteLength(password,'utf8')>72))return res.status(400).json({error:'Use a valid email and a password of 8–72 UTF-8 bytes.'});const hash=await bcrypt.hash(password,10);const rows=await sql`insert into players(username,email,password_hash,avatar,department,level) values(${username},${email},${hash},${avatar},${department},${level}) returning id,username,avatar,bio,department,level,created_at,last_seen`;await sessions.create(res,rows[0].id);res.json({profile:publicProfile(rows[0])})}catch(e){res.status(400).json({error:e.message&&e.message.includes('duplicate')?'Username or email already exists.':'Could not create account.'})}});
+app.post('/api/auth/login',async(req,res)=>{try{const login=String(req.body.login||'').toLowerCase().trim();const password=String(req.body.password||'');const rows=await sql`select * from players where lower(email)=${login} or lower(username)=${login}`;const user=rows[0];if(!user||!(await bcrypt.compare(password,user.password_hash)))return res.status(401).json({error:'Incorrect login details.'});await sql`update players set last_seen=now() where id=${user.id}`;await sessions.create(res,user.id);res.json({profile:publicProfile(user)})}catch(e){res.status(500).json({error:'Login failed.'})}});
+app.post('/api/auth/logout',async(req,res)=>{const digest=await sessions.revoke(req,res);for(const ws of wss.clients)if(ws.sessionHash===digest)ws.close(4001,'Signed out');res.json({ok:true})});
 app.get('/api/me',auth,async(req,res)=>{res.json({profile:publicProfile(await getMe(req.user.id)),online:[...online.values()].map(publicProfile)})});
 app.patch('/api/me',auth,async(req,res)=>{try{const avatar=clean(req.body.avatar,12)||'🧑🏾‍🎓',bio=clean(req.body.bio,180),department=clean(req.body.department,60),level=clean(req.body.level,30);const rows=await sql`update players set avatar=${avatar},bio=${bio},department=${department},level=${level},last_seen=now() where id=${req.user.id} returning id,username,avatar,bio,department,level,created_at,last_seen`;broadcast({type:'profile',profile:publicProfile(rows[0])});res.json({profile:publicProfile(rows[0])})}catch(e){res.status(400).json({error:'Could not update profile.'})}});
 // Require the current password before removing the player's own account and data.
@@ -82,7 +83,7 @@ app.delete('/api/me',auth,async(req,res)=>{
  if(!rows[0]||!await bcrypt.compare(String(req.body.password||''),rows[0].password_hash))return res.status(401).json({error:'Incorrect password.'});
  await sql`delete from players where id=${req.user.id}`;
  for(const ws of wss.clients)if(ws.userId===req.user.id)ws.close(4001,'Account deleted');
- online.delete(req.user.id);res.json({ok:true});
+ online.delete(req.user.id);await sessions.revoke(req,res);res.json({ok:true});
 });
 app.get('/api/players',auth,async(req,res)=>{const rows=await sql`select id,username,avatar,bio,department,level,created_at,last_seen from players order by last_seen desc limit 80`;res.json({players:rows.map(publicProfile),online:[...online.keys()]})});
 app.get('/api/messages',auth,async(req,res)=>{const room=clean(req.query.room||'campus',40)||'campus';const rows=await sql`select m.id,m.body,m.room,m.created_at,p.id as sender_id,p.username,p.avatar,p.department from messages m join players p on p.id=m.sender_id where m.room=${room} and not exists(select 1 from blocks b where (b.blocker_id=${req.user.id} and b.blocked_id=m.sender_id) or (b.blocked_id=${req.user.id} and b.blocker_id=m.sender_id)) order by m.created_at desc limit 60`;res.json({messages:rows.reverse()})});
@@ -112,5 +113,15 @@ const server=http.createServer(app);const wss=new WebSocketServer({server,path:'
 async function broadcastMessage(payload,sender){const blocks=await sql`select blocker_id,blocked_id from blocks where blocker_id=${sender} or blocked_id=${sender}`;const excluded=new Set(blocks.map(b=>b.blocker_id===sender?b.blocked_id:b.blocker_id));for(const ws of wss.clients)if(ws.userId&&!excluded.has(ws.userId)&&ws.readyState===1)ws.send(JSON.stringify(payload))}
 function broadcast(payload){const msg=JSON.stringify(payload);for(const ws of wss.clients){if(ws.userId&&ws.readyState===1)ws.send(msg)}}
 function sendTo(userId,payload){const msg=JSON.stringify(payload);for(const ws of wss.clients){if(ws.userId===userId&&ws.readyState===1)ws.send(msg)}}
-wss.on('connection',(ws,req)=>{try{const url=new URL(req.url,'http://localhost');const token=url.searchParams.get('token');const user=jwt.verify(token,JWT_SECRET);ws.expiry=setTimeout(()=>ws.close(4001,'Session expired'),Math.max(0,user.exp*1000-Date.now()));ws.pingId=crypto.randomUUID();getMe(user.id).then(p=>{if(!p){ws.close(4001,'Account unavailable');return}if(ws.readyState===1){ws.userId=user.id;online.set(user.id,p);broadcast({type:'online',online:[...online.values()].map(publicProfile)})}}).catch(()=>ws.close());ws.on('close',()=>{clearTimeout(ws.expiry);let still=false;for(const c of wss.clients){if(c!==ws&&c.userId===ws.userId&&c.readyState===1)still=true}if(!still){online.delete(ws.userId);sql`update players set last_seen=now() where id=${ws.userId}`.catch(()=>{});broadcast({type:'online',online:[...online.values()].map(publicProfile)})}})}catch(e){ws.close()}});
+wss.on('connection',async(ws,req)=>{
+ try{
+  if(!allowedOrigins.includes(req.headers.origin)){ws.close(4003,'Origin rejected');return}
+  const user=await sessions.read(req);if(!user||ws.readyState!==1){ws.close(4001,'Sign in required');return}
+  const p=await getMe(user.id);if(!p||ws.readyState!==1){ws.close(4001,'Account unavailable');return}
+  ws.sessionHash=user.token_hash;ws.userId=user.id;
+  ws.expiry=setTimeout(()=>ws.close(4001,'Session expired'),Math.max(0,new Date(user.expires_at).getTime()-Date.now()));
+  online.set(user.id,p);broadcast({type:'online',online:[...online.values()].map(publicProfile)});
+  ws.on('close',()=>{clearTimeout(ws.expiry);const still=[...wss.clients].some(c=>c!==ws&&c.userId===ws.userId&&c.readyState===1);if(!still){online.delete(ws.userId);sql`update players set last_seen=now() where id=${ws.userId}`.catch(()=>{});broadcast({type:'online',online:[...online.values()].map(publicProfile)})}});
+ }catch{ws.close(1011,'Connection unavailable')}
+});
 initDb().then(()=>server.listen(PORT,()=>console.log('Abuad Life social API on '+PORT))).catch(e=>{console.error('Database initialization failed. Check DATABASE_URL configuration.');process.exitCode=1});

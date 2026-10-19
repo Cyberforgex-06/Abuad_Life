@@ -14,7 +14,7 @@ const people=[{name:'Tomi',icon:'👩🏾‍💻',role:'The creative coder',text
 let zone='student',campusView='map',campusQuery='';
 let state=null,tab='campus',selected='hostel',audioOn=false,audioCtx,toastTimer;
 const fresh=(name,course,avatar)=>({version:1,name,course,avatar,location:'hostel',day:1,hour:8,money:12000,energy:85,hunger:80,mood:75,social:20,knowledge:15,skills:0,attendance:0,assignments:0,friends:[0,0,0],visits:[],actions:[],daily:{},logs:[],finished:false,events:0});
-function save(){syncStudentLife();try{localStorage.setItem(KEY,JSON.stringify(state));$('#saveStatus').textContent='✓ Saved on this browser'}catch{$('#saveStatus').textContent='Saving unavailable · keep this tab open'}}
+function save(){syncStudentLife();try{localStorage.setItem(KEY,JSON.stringify(state));$('#saveStatus').textContent='Saved on this device · cloud pending';window.dispatchEvent(new Event('abuad:save'))}catch{$('#saveStatus').textContent='Saving unavailable · keep this tab open'}}
 function clamp(v){return Math.max(0,Math.min(100,v))}
 function money(v){return '₦'+v.toLocaleString('en-NG')}
 function log(t){state.logs.unshift({day:state.day,hour:state.hour,text:t});state.logs=state.logs.slice(0,150)}
@@ -50,3 +50,7 @@ try{const raw=JSON.parse(localStorage.getItem(KEY));if(raw&&raw.version===1&&typ
 if(state){state.location=places.some(p=>p.id===state.location)?state.location:'hostel';selected=state.location;zone=places.find(p=>p.id===selected).zone;render()}else{const placeholder=fresh('New student','Your next chapter','🧑🏾‍🎓');state=placeholder;render();state=null;intro()}
 
 window.AbuadLifeGame={snapshot:()=>state?JSON.parse(JSON.stringify(state)):null,restore(value){if(!value||value.version!==1||typeof value.name!=='string'||!Array.isArray(value.friends)||!Array.isArray(value.logs))throw new Error('Invalid saved character');state=JSON.parse(JSON.stringify(value));selected=state.location||'hostel';close();save();render()}};
+
+window.AbuadLifeGame.startProfile=function(p){state=fresh(p.username,p.department||'Computer Science',p.avatar||'🧑🏾‍🎓');selected='hostel';close();save();render()};
+
+window.AbuadLifeGame.refresh=()=>render();
